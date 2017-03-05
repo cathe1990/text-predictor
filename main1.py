@@ -51,7 +51,7 @@ def parse_line(line):
     return (y, X)
 
 
-def hasher(X):
+def hasher(file):
     """
     :function: transform str to vector for features
     choose the NO of feature for hash table to keep the load factor at 75% or less
@@ -60,55 +60,41 @@ def hasher(X):
     :type train, test: matrix
     """
     h = FeatureHasher(n_features=1000)
+    X = read_bz2(file)[1]
     vector = h.transform(X)
     return vector
 
-class Predictor():
-    def __init__(self, train_file, test_file):
-        #train_X, train_y, test_X needed
-        self.y, X_str = read_bz2(file_path=train_file)
-        self.train_X = hasher(X_str)
-        _, X_str_test = read_bz2(file_path=test_file)
-        self.test_X = hasher(X_str_test)
+
+def get_optimized_estimator_by_grid_search(train_X, train_y):
+
+    params = [
+        {'C': [2**i for i in range(2, 3, 1)], 'gamma': [2**i for i in np.arange(-8, -7.5, 0.5)], 'kernel': ['rbf']},
+    ]
+    method = svm.SVC()
+    gscv = grid_search.GridSearchCV(method, params, scoring='accuracy', n_jobs=9)
+    gscv.fit(train_X, train_y)
+    for params, mean_score, all_scores in gscv.grid_scores_:
+        logger.info('{:.3f} (+/- {:.3f}) for {}'.format(mean_score, all_scores.std() / 2, params))
+    logger.info('params:{params}'.format(params=gscv.best_params_))
+    logger.info('score:{params}'.format(params=gscv.best_score_))
+    return (gscv.best_params_['C'], gscv.best_params_['gamma']) 
 
 
-    def normal_model(self):
-        method = svm.SVC(C=2, kernel='rbf', gamma=0.005)
-        clf.fit(self.train_X, self.y)
-        return clf
-
-
-    def optimize_model(self):
-        params = [
-            {'C': [2**i for i in range(2, 3, 1)], 'gamma': [2**i for i in np.arange(-8, -7.5, 0.5)], 'kernel': ['rbf']},
-        ]
-        method = svm.SVC()
-        gscv = grid_search.GridSearchCV(method, params, scoring='accuracy', n_jobs=9)
-        gscv.fit(self.train_X, self.y)
-        for params, mean_score, all_scores in gscv.grid_scores_:
-            logger.info('{:.3f} (+/- {:.3f}) for {}'.format(mean_score, all_scores.std() / 2, params))
-        logger.info('params:{params}'.format(params=gscv.best_params_))
-        logger.info('score:{params}'.format(params=gscv.best_score_))
-        C = gscv.best_params_['C'] 
-        gamma = gscv.best_params_['gamma']
-        clf = svm.SVC(C=C, kernel='rbf', gamma=gamma)
-        clf.fit(self.train_X, self.y)
-        return clf
-
-
-    def predict(self, model):
-        if (model == 'normal_model'):
-            self.normal_model().predict(self.test_X)
-        else:
-            self.optimize_model().predict(self.test_X)
+def predictor(train_X, train_y, test_file):
+    test_X = hasher(test_file)
+    C, gamma = get_optimized_estimator_by_grid_search(train_X, train_y)
+    clf = svm.SVC(C=C, kernel='rbf', gamma=gamma)
+    clf.fit(train_X, train_y)
+    result = clf.predict(test_X)
+    with open("Output.txt", "a") as text_file:
+        print("Predict result: {}".format(result), file=text_file)
 
 
 if __name__ == '__main__':
     start_time = dt.datetime.now()
     init_logger()
-    text_predictor = Predictor(train_file='training-data-small.txt.bz2',test_file='test-data-small.txt.bz2')
-    result = text_predictor.predict(model='optimize_model')
-    with open("Output.txt", "a") as text_file:
-        print("Predict result: {}".format(result), file=text_file)
+    y, X = read_bz2('training-data-small.txt.bz2')
+    X_vector = hasher(file='training-data-small.txt.bz2')
+    predictor(X_vector, y, 'test-data-small.txt.bz2')
     end_time = dt.datetime.now()
     print('Total time: {}'.format((end_time - start_time).seconds))
