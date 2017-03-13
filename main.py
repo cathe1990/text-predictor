@@ -1,114 +1,193 @@
+#!usr/bin/python
+# _*_ coding: utf-8 _*_
+
 import bz2
+import time
+
 import numpy as np
-from sklearn import svm
-from sklearn import grid_search
-from sklearn import cross_validation
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.feature_extraction import FeatureHasher
-import logging
-import datetime as dt
-import csv
-
-def init_logger():
-    global logger
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-    log_fmt = '%(asctime)s/%(name)s[%(levelname)s]: %(message)s'
-    logging.basicConfig(format=log_fmt)
-
-def read_bz2(file_path):
-    """read file directly from bz2 file, return tuple of list of y and list of X
-    :type file_path: str
-    :type all_X/x: list
-    """
-    all_X = []
-    all_y = []
-    with bz2.open(file_path, 'r') as f:
-        for line in f:
-            y, X = parse_line(line.decode('utf-8'))
-            all_X.append(X)
-            all_y.append(y)
-    return (all_y, all_X)
+from sklearn.linear_model import SGDClassifier
 
 
-def parse_line(line):
-    r"""parse a single line, return tuple (y, X)
-    :type line: str
+def chunk_file(f, chunksize=1024000):
+    return iter(lambda: f.readlines(chunksize), [])
 
-    :type y: int, 0 or 1
-    :type X: dict, number of occurances of each feature
-    >>> parse_line('0\ta,a,a\n')
-    (0, {'a': 3})
-    """
-    # get y
-    if (len(line.split())==2):
-        y = int(line.split()[0])
-        X_list = line.split()[1].split(',')
-    else:
-        y = None
-        X_list = line.split()[0].split(',')
-    # count occurances of each unique feature in line
-    X = {feature: X_list.count(feature) for feature in set(X_list)}
+
+def feature_hash(X, n_features=1000):
+    h = FeatureHasher(n_features=n_features)
+    return h.transform(X)
+
+
+def parse_lines(lines):
+    y = []
+    X = []
+    for line in lines:
+        line = line.decode('utf-8').split()
+        if len(line) == 1:
+            X.append({feature: line[0].split(',').count(feature) for feature in set(line[0].split(','))})
+        else:
+            y.append(int(line[0]))
+            X.append({feature: line[1].split(',').count(feature) for feature in set(line[1].split(','))})
     return (y, X)
 
 
-def hasher(X):
+def classifier_comparision(train_data_path='training-data-small.txt.bz2', cv=10):
+    """This function simply does a comparision of selected classifiers as follows,
+    1. support vector machine, kernel: linear
+    2. supoort vector machine, kernel: rbf
+    3. Nearest Neighbors
+    4. Neural Network, MLPClassfier
+
+    :type train_data_path: str
+    :params train_data_path: the path to training data file
+    :type cv: int
+    :params cv: cross-validation generator, ref. k-fold
+
+    :type return: list of tuples
+    :params return: a list of tuples, (cross valdiation score, algorithm name)
+
+    :the print-out result of classifier comparision
+    - Accuracy of linear svm: 0.67 (+/- 0.0)
+    - Accuracy of rbf svm: 0.64 (+/- 0.0)
+    - Accuracy of nearest neighbors: 0.56 (+/- 0.0)
+    - Accuracy of neural network: 0.67 (+/- 0.0)
     """
-    :function: transform str to vector for features
-    choose the NO of feature for hash table to keep the load factor at 75% or less
-    (test and see how many collisions by changing the NO and hash function)
-    X_train, Y_test are feature lists
-    :type train, test: matrix
+    from sklearn import metrics
+    from sklearn.model_selection import cross_val_score
+
+    # load training data
+    train_X, train_y = load_data(data_path=train_data_path)
+
+    # select classifiers
+    classifiers = [(SVC(kernel='linear'), 'linear svm'),
+                   (SVC(kernel='rbf'), 'rbf svm'),
+                   (KNeighborsClassifier(n_neighbors=3), 'nearest neighbors'),
+                   (MLPClassifier(alpha=1), 'neural network')]
+
+    scores = [(cross_val_score(clf, train_X, train_y, cv=cv, scoring='f1'), name) for clf, name in classifiers]
+    for score, name in scores:
+        print("Accuracy of {}: {} (+/- {})".format(name, round(score.mean(), 2), round(score.std()*2), 2))
+
+    return scores
+
+
+def load_data(data_path):
+    """Read bz2 file and ouput the y and X"""
+    with bz2.open(data_path, 'r') as f:
+        train_y, X = parse_lines(f.readlines())
+        train_X = feature_hash(X)
+    return (train_X, train_y)
+
+
+def optimize_svm(train_data_path='training-data-small.txt.bz2'):
+    """Run grid search to determine best C or gamma for svm
+    Generally, C ranges from 1 to 1000, and gamma is no larger than 0.1.
+    :type train_data_path: str
+    :params train_data_path: the path to training data file
+
+    :type return: dict
+    :params return: best params obtained by grid search
     """
-    h = FeatureHasher(n_features=1000)
-    vector = h.transform(X)
-    return vector
+    from sklearn import grid_search
+    from sklearn import metrics
 
-class Predictor():
-    def __init__(self, train_file, test_file):
-        #train_X, train_y, test_X needed
-        self.y, X_str = read_bz2(file_path=train_file)
-        self.train_X = hasher(X_str)
-        _, X_str_test = read_bz2(file_path=test_file)
-        self.test_X = hasher(X_str_test)
+    # load training data
+    train_X, train_y = load_data(data_path=train_data_path)
 
+    # config the range of C and gamma in grid search
+    param_grid = [{'C': [2**i for i in range(0, 10, 1)],  # 1 <= C <= 1000
+                   'gamma': [2**i for i in np.arange(-8, -3, 0.5)],  # 0 < gamma <= 0.1
+                   'kernel': ['rbf']},
+                  {'C': [2**i for i in range(0, 10, 1)],  # 1 <= C <= 1000
+                   'kernel': ['linear']}]
+    method = SVC()
+    grid_search = grid_search.GridSearchCV(method, param_grid, scoring='f1', n_jobs=9)
+    grid_search.fit(train_X, train_y)
 
-    def normal_model(self):
-        method = svm.SVC(C=2, kernel='rbf', gamma=0.005)
-        clf.fit(self.train_X, self.y)
-        return clf
-
-
-    def optimize_model(self):
-        params = [
-            {'C': [2**i for i in range(2, 3, 1)], 'gamma': [2**i for i in np.arange(-8, -7.5, 0.5)], 'kernel': ['rbf']},
-        ]
-        method = svm.SVC()
-        gscv = grid_search.GridSearchCV(method, params, scoring='accuracy', n_jobs=9)
-        gscv.fit(self.train_X, self.y)
-        for params, mean_score, all_scores in gscv.grid_scores_:
-            logger.info('{:.3f} (+/- {:.3f}) for {}'.format(mean_score, all_scores.std() / 2, params))
-        logger.info('params:{params}'.format(params=gscv.best_params_))
-        logger.info('score:{params}'.format(params=gscv.best_score_))
-        C = gscv.best_params_['C'] 
-        gamma = gscv.best_params_['gamma']
-        clf = svm.SVC(C=C, kernel='rbf', gamma=gamma)
-        clf.fit(self.train_X, self.y)
-        return clf
+    return grid_search.best_params_
 
 
-    def predict(self, model):
-        if (model == 'normal_model'):
-            self.normal_model().predict(self.test_X)
+def build_model(train_data_path='training-data-small.txt.bz2',
+                scale='small',
+                C=1,
+                gamma=0.1,
+                kernel='rbf',
+                chunksize=1024000):
+    """Return the trained model
+    by given training data and parameters (optimized C, gamma)
+    """
+    if scale == 'small':
+        if 'large' in train_data_path:
+            raise ValueError("You can only choose small dataset in small scale")
         else:
-            self.optimize_model().predict(self.test_X)
+            model = SVC(C=C, gamma=gamma, kernel=kernel)
+            # load training data
+            train_X, train_y = load_data(data_path=train_data_path)
+            model.fit(train_X, train_y)
+    else:
+        if 'small' in train_data_path:
+            raise ValueError("You can only choose large dataset in large scale")
+        else:
+            model = SGDClassifier()
+            from sklearn.kernel_approximation import RBFSampler
+            # kernel approximation
+            rbf_feature = RBFSampler(gamma=gamma, random_state=1, n_components=1000)
+            # incremental learning with SGDClassifier
+            with bz2.open(train_data_path, 'r') as f:
+                for chunk in chunk_file(f):
+                    print(time.time())
+                    train_y, X = parse_lines(chunk)
+                    train_X = feature_hash(X)
+                    train_X_rbf = rbf_feature.fit_transform(train_X)
+                    model.partial_fit(train_X_rbf, train_y, classes=np.array([0, 1]))
+
+    return model
+
+
+def predict(scale='small', output_file='output-small.txt',
+            C=None, gamma=None, kernel=None):
+    """Run the prediction with given test data
+    """
+    # do params optimization
+    print("Notice that, the grid search may take long time. In such condition, you may want to use the given C, gamma and kernel")  # nopep8
+    if C and gamma and kernel:
+        print('hello! Lets go')
+        best_C = C
+        best_gamma = gamma
+        best_kernel = kernel
+    else:
+        params = optimize_svm()
+        best_C = params['C']
+        best_gamma = params['gamma']
+        best_kernel = params['kenel']
+
+    if scale == 'small':
+        # build the model
+        model = build_model(C=best_C,
+                            gamma=best_gamma,
+                            kernel=best_kernel)
+        # load test data
+        test_X, _ = load_data(data_path='test-data-small.txt.bz2')
+
+    elif scale == 'large':
+        model = build_model(train_data_path='training-data-large.txt.bz2',
+                            scale='large',
+                            gamma=best_gamma,
+                            chunksize=1024000)
+        # load test data
+        test_X, _ = load_data(data_path='test-data-large.txt.bz2')
+
+    # predict result
+    predict_y = model.predict(test_X)
+    # save result to a file
+    with open(output_file, 'w+') as f:
+        for y in predict_y:
+            print(y, file=f)
 
 
 if __name__ == '__main__':
-    start_time = dt.datetime.now()
-    init_logger()
-    text_predictor = Predictor(train_file='training-data-small.txt.bz2',test_file='test-data-small.txt.bz2')
-    result = text_predictor.predict(model='optimize_model')
-    with open("Output.txt", "a") as text_file:
-        print("Predict result: {}".format(result), file=text_file)
-    end_time = dt.datetime.now()
-    print('Total time: {}'.format((end_time - start_time).seconds))
+    predict(scale='large', output_file='output-large.txt', C=16, gamma=0.0781, kernel='rbf')
+
